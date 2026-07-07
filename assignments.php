@@ -1,0 +1,257 @@
+<?php
+require_once '../config.php';
+require_once '../includes/auth.php';
+requireRole('teacher');
+
+$pageTitle = 'Assignments';
+$teacherId = $_SESSION['user_id'];
+$success = $error = '';
+
+$classes = $pdo->prepare("SELECT id, name, section FROM classes WHERE teacher_id = ?");
+$classes->execute([$teacherId]);
+$classes = $classes->fetchAll();
+
+// Add assignment
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $_POST['action'] === 'add') {
+    $title      = trim($_POST['title']);
+    $desc       = trim($_POST['description']);
+    $classId    = (int)$_POST['class_id'];
+    $dueDate    = $_POST['due_date'];
+
+    $pdo->prepare("INSERT INTO assignments (title, description, class_id, teacher_id, due_date) VALUES (?,?,?,?,?)")
+        ->execute([$title, $desc, $classId, $teacherId, $dueDate]);
+    $success = "Assignment '$title' posted successfully.";
+}
+
+// Delete assignment
+if (isset($_GET['delete'])) {
+    $pdo->prepare("DELETE FROM assignments WHERE id = ? AND teacher_id = ?")->execute([$_GET['delete'], $teacherId]);
+    $success = 'Assignment deleted.';
+}
+
+// Grade submission
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $_POST['action'] === 'grade') {
+    $pdo->prepare("UPDATE submissions SET grade = ?, feedback = ? WHERE id = ?")
+        ->execute([$_POST['grade'], $_POST['feedback'], $_POST['sub_id']]);
+    $success = 'Submission graded.';
+}
+
+$assignments = $pdo->prepare("SELECT a.*, c.name AS class_name,
+    (SELECT COUNT(*) FROM submissions s WHERE s.assignment_id = a.id) AS sub_count
+    FROM assignments a JOIN classes c ON c.id = a.class_id
+    WHERE a.teacher_id = ? ORDER BY a.created_at DESC");
+$assignments->execute([$teacherId]);
+$assignments = $assignments->fetchAll();
+
+// View submissions for a specific assignment
+$viewSubs = [];
+$viewAssignment = null;
+if (isset($_GET['view'])) {
+    $stmt = $pdo->prepare("SELECT a.* FROM assignments a WHERE a.id = ? AND a.teacher_id = ?");
+    $stmt->execute([$_GET['view'], $teacherId]);
+    $viewAssignment = $stmt->fetch();
+    if ($viewAssignment) {
+        $subStmt = $pdo->prepare("SELECT s.*, u.name AS student_name FROM submissions s
+            JOIN users u ON u.id = s.student_id WHERE s.assignment_id = ?");
+        $subStmt->execute([$_GET['view']]);
+        $viewSubs = $subStmt->fetchAll();
+    }
+}
+
+include '../includes/header.php';
+?>
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h4 class="section-title"><i class="bi bi-journal-text me-2 text-secondary"></i>Assignments</h4>
+    <button class="btn btn-secondary" data-bs-toggle="modal" data-bs-target="#addAssignmentModal">
+        <i class="bi bi-plus-circle me-2"></i>Post Assignment
+    </button>
+</div>
+
+<?php if ($success): ?>
+<div class="alert alert-success alert-dismissible fade show"><?= $success ?>
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>
+<?php endif; ?>
+
+<?php if ($viewAssignment): ?>
+<!-- View Submissions -->
+<div class="card border-0 shadow-sm rounded-3 mb-4">
+    <div class="card-header bg-secondary text-white d-flex justify-content-between align-items-center">
+        <h6 class="mb-0"><i class="bi bi-file-earmark-text me-2"></i>Submissions: <?= htmlspecialchars($viewAssignment['title']) ?></h6>
+        <a href="assignments.php" class="btn btn-sm btn-light">← Back</a>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover mb-0">
+                <thead class="table-light">
+                    <tr><th>Student</th><th>Submitted At</th><th>Grade</th><th>Feedback</th><th>Action</th></tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($viewSubs as $sub): ?>
+                    <tr>
+                        <td><?= htmlspecialchars($sub['student_name']) ?></td>
+                        <td><?= date('d M Y H:i', strtotime($sub['submitted_at'])) ?></td>
+                        <td><?= $sub['grade'] ? "<span class='badge bg-success'>{$sub['grade']}</span>" : '<span class="text-muted">Not graded</span>' ?></td>
+                        <td><?= htmlspecialchars($sub['feedback'] ?? '-') ?></td>
+                        <td>
+                            <button class="btn btn-sm btn-outline-primary"
+                                    data-bs-toggle="modal" data-bs-target="#gradeModal"
+                                    data-subid="<?= $sub['id'] ?>"
+                                    data-student="<?= htmlspecialchars($sub['student_name']) ?>"
+                                    data-grade="<?= htmlspecialchars($sub['grade'] ?? '') ?>"
+                                    data-feedback="<?= htmlspecialchars($sub['feedback'] ?? '') ?>">
+                                <i class="bi bi-award me-1"></i>Grade
+                            </button>
+                        </td>
+                    </tr>
+                    <?php endforeach; ?>
+                    <?php if (empty($viewSubs)): ?>
+                    <tr><td colspan="5" class="text-center text-muted py-4">No submissions yet.</td></tr>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+<?php endif; ?>
+
+<!-- All Assignments -->
+<div class="card border-0 shadow-sm rounded-3">
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-custom table-hover mb-0">
+                <thead>
+                    <tr><th>#</th><th>Title</th><th>Class</th><th>Due Date</th><th>Submissions</th><th>Actions</th></tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($assignments as $i => $a): 
+                        $overdue = strtotime($a['due_date']) < time();
+                    ?>
+                    <tr>
+                        <td><?= $i + 1 ?></td>
+                        <td>
+                            <strong><?= htmlspecialchars($a['title']) ?></strong>
+                            <br><small class="text-muted"><?= htmlspecialchars(substr($a['description'], 0, 60)) ?>...</small>
+                        </td>
+                        <td><?= htmlspecialchars($a['class_name']) ?></td>
+                        <td>
+                            <span class="badge bg-<?= $overdue ? 'danger' : 'success' ?>">
+                                <?= date('d M Y', strtotime($a['due_date'])) ?>
+                                <?= $overdue ? ' (Overdue)' : '' ?>
+                            </span>
+                        </td>
+                        <td><span class="badge bg-primary"><?= $a['sub_count'] ?> submitted</span></td>
+                        <td class="d-flex gap-1">
+                            <a href="assignments.php?view=<?= $a['id'] ?>" class="btn btn-sm btn-outline-info">
+                                <i class="bi bi-eye"></i>
+                            </a>
+                            <a href="assignments.php?delete=<?= $a['id'] ?>"
+                               class="btn btn-sm btn-outline-danger"
+                               onclick="return confirm('Delete assignment?')">
+                                <i class="bi bi-trash"></i>
+                            </a>
+                        </td>
+                    </tr>
+                    <?php endforeach; ?>
+                    <?php if (empty($assignments)): ?>
+                    <tr><td colspan="6" class="text-center text-muted py-4">No assignments posted yet.</td></tr>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Add Assignment Modal -->
+<div class="modal fade" id="addAssignmentModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content rounded-3">
+            <div class="modal-header bg-secondary text-white">
+                <h5 class="modal-title"><i class="bi bi-journal-plus me-2"></i>Post New Assignment</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="POST">
+                <div class="modal-body">
+                    <input type="hidden" name="action" value="add">
+                    <div class="mb-3">
+                        <label class="form-label">Assignment Title *</label>
+                        <input type="text" class="form-control" name="title" required placeholder="e.g. Data Structures Assignment 1">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Description / Instructions *</label>
+                        <textarea class="form-control" name="description" rows="4" required placeholder="Detailed instructions for students..."></textarea>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Class *</label>
+                            <select class="form-select" name="class_id" required>
+                                <option value="">Select Class</option>
+                                <?php foreach ($classes as $c): ?>
+                                <option value="<?= $c['id'] ?>"><?= htmlspecialchars($c['name']) ?> (<?= $c['section'] ?>)</option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Due Date *</label>
+                            <input type="date" class="form-control" name="due_date" required min="<?= date('Y-m-d') ?>">
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-secondary"><i class="bi bi-send me-1"></i>Post Assignment</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Grade Modal -->
+<div class="modal fade" id="gradeModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content rounded-3">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title"><i class="bi bi-award me-2"></i>Grade Submission</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="POST">
+                <div class="modal-body">
+                    <input type="hidden" name="action" value="grade">
+                    <input type="hidden" name="sub_id" id="gradeSubId">
+                    <p>Student: <strong id="gradeStudentName"></strong></p>
+                    <div class="mb-3">
+                        <label class="form-label">Grade</label>
+                        <select class="form-select" name="grade" id="gradeSelect">
+                            <option value="">-- Select Grade --</option>
+                            <option value="A+">A+</option><option value="A">A</option>
+                            <option value="B+">B+</option><option value="B">B</option>
+                            <option value="C">C</option><option value="D">D</option>
+                            <option value="F">F</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Feedback</label>
+                        <textarea class="form-control" name="feedback" id="gradeFeedback" rows="3" placeholder="Optional feedback..."></textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Grade</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+const gradeModal = document.getElementById('gradeModal');
+gradeModal.addEventListener('show.bs.modal', function(e) {
+    const btn = e.relatedTarget;
+    document.getElementById('gradeSubId').value    = btn.dataset.subid;
+    document.getElementById('gradeStudentName').textContent = btn.dataset.student;
+    document.getElementById('gradeSelect').value   = btn.dataset.grade;
+    document.getElementById('gradeFeedback').value = btn.dataset.feedback;
+});
+</script>
+
+<?php include '../includes/footer.php'; ?>
